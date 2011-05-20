@@ -24,29 +24,11 @@
 ////////////////////////////////////////////////////////////////////////////////
 
 /**
- * Constants used in RestServer Class.
- */
-class RestFormat
-{
-
-	const PLAIN = 'text/plain';
-	const HTML = 'text/html';
-	const AMF = 'applicaton/x-amf';
-	const JSON = 'application/json';
-	static public $formats = array(
-		'plain' => RestFormat::PLAIN,
-		'html' => RestFormat::HTML,
-		'amf' => RestFormat::AMF,
-		'json' => RestFormat::JSON,
-	);
-}
-
-/**
- * Description of RestServer
+ * Description of rest_server
  *
  * @author jacob
  */
-class RestServer
+class rest_server
 {
 	public $url;
 	public $method;
@@ -56,14 +38,14 @@ class RestServer
 	public $realm;
 	public $mode;
 	public $root;
-	
+
 	protected $map = array();
 	protected $errorClasses = array();
 	protected $cached;
 
 	/**
 	 * The constructor.
-	 * 
+	 *
 	 * @param string $mode The mode, either debug or production
 	 */
 	public function  __construct($mode = 'debug', $realm = 'Rest Server')
@@ -71,9 +53,16 @@ class RestServer
 		$this->mode = $mode;
 		$this->realm = $realm;
 		$dir = dirname(str_replace($_SERVER['DOCUMENT_ROOT'], '', $_SERVER['SCRIPT_FILENAME']));
-		$this->root = ($dir == '.' ? '' : $dir . '/');
+		$this->root = ($dir == '.' ? '' : trim($dir,'/') . '/');
 	}
-	
+
+    public function firePhp($data,$key="data"){
+        if ($this->mode == 'debug'){
+            $firephp = FirePHP::getInstance(true);
+            $firephp->dump($key, $data);
+        }
+    }
+
 	public function  __destruct()
 	{
 		if ($this->mode == 'production' && !$this->cached) {
@@ -84,34 +73,34 @@ class RestServer
 			}
 		}
 	}
-	
+
 	public function refreshCache()
 	{
 		$this->map = array();
 		$this->cached = false;
 	}
-	
+
 	public function unauthorized($ask = false)
 	{
 		if ($ask) {
 			header("WWW-Authenticate: Basic realm=\"$this->realm\"");
 		}
-		throw new RestException(401, "You are not authorized to access this resource.");
+		throw new rest_exception(401, "You are not authorized to access this resource.");
 	}
-	
-	
+
+
 	public function handle()
 	{
 		$this->url = $this->getPath();
 		$this->method = $this->getMethod();
 		$this->format = $this->getFormat();
-		
+
 		if ($this->method == 'PUT' || $this->method == 'POST') {
 			$this->data = $this->getData();
 		}
-		
+
 		list($obj, $method, $params, $this->params, $noAuth) = $this->findUrl();
-		
+
 		if ($obj) {
 			if (is_string($obj)) {
 				if (class_exists($obj)) {
@@ -120,45 +109,79 @@ class RestServer
 					throw new Exception("Class $obj does not exist");
 				}
 			}
-			
+
 			$obj->server = $this;
-			
+
 			try {
 				if (method_exists($obj, 'init')) {
 					$obj->init();
 				}
-				
+
 				if (!$noAuth && method_exists($obj, 'authorize')) {
 					if (!$obj->authorize()) {
 						$this->sendData($this->unauthorized(true));
 						exit;
 					}
 				}
-				
+
 				$result = call_user_func_array(array($obj, $method), $params);
-			} catch (RestException $e) {
+			} catch (rest_exception $e) {
 				$this->handleError($e->getCode(), $e->getMessage());
 			}
-			
+
 			if ($result !== null) {
 				$this->sendData($result);
 			}
 		} else {
 			$this->handleError(404);
 		}
+		$this->firePhp($this);
 	}
+
+    // this is to use with magic autoinclude.
+    public function get_dir_classes($lib_dir,$subdir,$seperator="_",$recurse=true,$follow_symlic=false){
+        $classes=array();
+
+        $full_dir = $lib_dir.DIRECTORY_SEPARATOR.$subdir;
+
+        //using the opendir function
+        $dir_handle = @opendir($full_dir) or die("Unable to open $full_dir");
+        //running the while loop
+        while ($file = readdir($dir_handle)){
+            if($file!="." && $file!=".."){
+                if(strpos($file,'.php')>0){
+                    //echo "<a href='$file'>$file</a><br/>";
+                    $classes[] = str_replace(DIRECTORY_SEPARATOR,$seperator,$subdir).$seperator.str_replace('.php','',$file);
+                } elseif($recurse && is_dir($full_dir.DIRECTORY_SEPARATOR.$file) && ($follow_symlic || !is_link($full_dir.DIRECTORY_SEPARATOR.$file)) && $file<>'.svn') {
+                    $more_files = $this->get_dir_classes($lib_dir,$subdir.DIRECTORY_SEPARATOR.$file,$seperator,$recurse,$follow_symlic);
+                    $classes = array_merge($classes,$more_files);
+                }
+            }
+        }
+        //closing the directory
+        closedir($dir_handle);
+        return $classes;
+    }
+
+    public function add_dir($libdir,$subdir='rest',$basePath = '',$seperator="_",$recurse=true,$follow_symlic=false){
+        $list = $this->get_dir_classes($libdir,$subdir,$seperator,$recurse,$follow_symlic);
+        foreach($list as $class){
+            // function get_dir_classes adds the prefix and seperator to class name for autoloading
+            $this->addClass($class,$basePath);
+        }
+    }
 
 	public function addClass($class, $basePath = '')
 	{
 		$this->loadCache();
-		
+
 		if (!$this->cached) {
 			if (is_string($class) && !class_exists($class)){
 				throw new Exception('Invalid method or class');
 			} elseif (!is_string($class) && !is_object($class)) {
 				throw new Exception('Invalid method or class; must be a classname or object');
 			}
-			
+
 			if (substr($basePath, 0, 1) == '/') {
 				$basePath = substr($basePath, 1);
 			}
@@ -169,12 +192,12 @@ class RestServer
 			$this->generateMap($class, $basePath);
 		}
 	}
-	
+
 	public function addErrorClass($class)
 	{
 		$this->errorClasses[] = $class;
 	}
-	
+
 	public function handleError($statusCode, $errorMessage = null)
 	{
 		$method = "handle$statusCode";
@@ -184,7 +207,7 @@ class RestServer
 			} elseif (class_exists($class)) {
 				$reflection = new ReflectionClass($class);
 			}
-			
+
 			if ($reflection->hasMethod($method))
 			{
 				$obj = is_string($class) ? new $class() : $class;
@@ -192,21 +215,21 @@ class RestServer
 				return;
 			}
 		}
-		
+
 		$message = $this->codes[$statusCode] . ($errorMessage && $this->mode == 'debug' ? ': ' . $errorMessage : '');
-		
+
 		$this->setStatus($statusCode);
 		$this->sendData(array('error' => array('code' => $statusCode, 'message' => $message)));
 	}
-	
+
 	protected function loadCache()
 	{
 		if ($this->cached !== null) {
 			return;
 		}
-		
+
 		$this->cached = false;
-		
+
 		if ($this->mode == 'production') {
 			if (function_exists('apc_fetch')) {
 				$map = apc_fetch('urlMap');
@@ -225,16 +248,18 @@ class RestServer
 			}
 		}
 	}
-	
+
 	protected function findUrl()
 	{
 		$urls = $this->map[$this->method];
 		if (!$urls) return null;
-		
+
+				$this->firePhp($this->url);
 		foreach ($urls as $url => $call) {
 			$args = $call[2];
-			
+
 			if (!strstr($url, '$')) {
+				$this->firePhp($url);
 				if ($url == $this->url) {
 					if (isset($args['data'])) {
 						$params = array_fill(0, $args['data'] + 1, null);
@@ -252,11 +277,11 @@ class RestServer
 					if (isset($args['data'])) {
 						$params[$args['data']] = $this->data;
 					}
-					
+
 					foreach ($matches as $arg => $match) {
 						if (is_numeric($arg)) continue;
 						$paramMap[$arg] = $match;
-						
+
 						if (isset($args[$arg])) {
 							$params[$args[$arg]] = $match;
 						}
@@ -286,16 +311,16 @@ class RestServer
 		} elseif (class_exists($class)) {
 			$reflection = new ReflectionClass($class);
 		}
-		
+
 		$methods = $reflection->getMethods(ReflectionMethod::IS_PUBLIC);
-		
+
 		foreach ($methods as $method) {
 			$doc = $method->getDocComment();
 			$noAuth = strpos($doc, '@noAuth') !== false;
 			if (preg_match_all('/@url[ \t]+(GET|POST|PUT|DELETE|HEAD|OPTIONS)[ \t]+\/?(\S*)/s', $doc, $matches, PREG_SET_ORDER)) {
-				
+
 				$params = $method->getParameters();
-				
+
 				foreach ($matches as $match) {
 					$httpMethod = $match[1];
 					$url = $basePath . $match[2];
@@ -310,7 +335,7 @@ class RestServer
 					$call[] = $args;
 					$call[] = null;
 					$call[] = $noAuth;
-					
+
 					$this->map[$httpMethod][$url] = $call;
 				}
 			}
@@ -327,7 +352,7 @@ class RestServer
 		if ($this->root) $path = str_replace($this->root, '', $path);
 		return $path;
 	}
-	
+
 	public function getMethod()
 	{
 		$method = $_SERVER['REQUEST_METHOD'];
@@ -339,27 +364,34 @@ class RestServer
 		}
 		return $method;
 	}
-	
+
 	public function getFormat()
 	{
-		$format = RestFormat::PLAIN;
-		$accept = explode(',', $_SERVER['HTTP_ACCEPT']);
-		$override = isset($_GET['format']) ? $_GET['format'] : '';
-		if (isset(RestFormat::$formats[$override])) {
-			$format = RestFormat::$formats[$override];
-		} elseif (in_array(RestFormat::AMF, $accept)) {
-			$format = RestFormat::AMF;
-		} elseif (in_array(RestFormat::JSON, $accept)) {
-			$format = RestFormat::JSON;
+		$format = rest_format::PLAIN;
+		$accept_mod = preg_replace('/\s+/i', '', $_SERVER['HTTP_ACCEPT']); // ensures that exploding the HTTP_ACCEPT string does not get confused by whitespaces
+		$accept = explode(',', $accept_mod);
+		$override = '';
+		if (isset($_REQUEST['format']) || isset($_SERVER['HTTP_FORMAT'])) {
+			// give GET/POST precedence over HTTP request headers
+			$override = isset($_SERVER['HTTP_FORMAT']) ? $_SERVER['HTTP_FORMAT'] : '';
+			$override = isset($_REQUEST['format']) ? $_REQUEST['format'] : $override;
+			$override = trim($override);
+		}
+		if (isset(rest_format::$formats[$override])) {
+			$format = rest_format::$formats[$override];
+		} elseif (in_array(rest_format::AMF, $accept)) {
+			$format = rest_format::AMF;
+		} elseif (in_array(rest_format::JSON, $accept)) {
+			$format = rest_format::JSON;
 		}
 		return $format;
 	}
-	
+
 	public function getData()
 	{
 		$data = file_get_contents('php://input');
-		
-		if ($this->format == RestFormat::AMF) {
+
+		if ($this->format == rest_format::AMF) {
 			require_once 'Zend/Amf/Parse/InputStream.php';
 			require_once 'Zend/Amf/Parse/Amf3/Deserializer.php';
 			$stream = new Zend_Amf_Parse_InputStream($data);
@@ -368,10 +400,10 @@ class RestServer
 		} else {
 			$data = json_decode($data);
 		}
-		
+
 		return $data;
 	}
-	
+
 
 	public function sendData($data)
 	{
@@ -379,7 +411,7 @@ class RestServer
 		header("Expires: 0");
 		header('Content-Type: ' . $this->format);
 
-		if ($this->format == RestFormat::AMF) {
+		if ($this->format == rest_format::AMF) {
 			require_once 'Zend/Amf/Parse/OutputStream.php';
 			require_once 'Zend/Amf/Parse/Amf3/Serializer.php';
 			$stream = new Zend_Amf_Parse_OutputStream();
@@ -407,7 +439,7 @@ class RestServer
 		$code .= ' ' . $this->codes[strval($code)];
 		header("{$_SERVER['SERVER_PROTOCOL']} $code");
 	}
-	
+
 	// Pretty print some JSON
 	private function json_format($json)
 	{
@@ -415,9 +447,9 @@ class RestServer
 		$new_json = "";
 		$indent_level = 0;
 		$in_string = false;
-		
+
 		$len = strlen($json);
-		
+
 		for($c = 0; $c < $len; $c++) {
 			$char = $json[$c];
 			switch($char) {
@@ -459,10 +491,10 @@ class RestServer
 					}
 				default:
 					$new_json .= $char;
-					break;					
+					break;
 			}
 		}
-		
+
 		return $new_json;
 	}
 
@@ -503,14 +535,4 @@ class RestServer
 		'501' => 'Not Implemented',
 		'503' => 'Service Unavailable'
 	);
-}
-
-class RestException extends Exception
-{
-	
-	public function __construct($code, $message = null)
-	{
-		parent::__construct($message, $code);
-	}
-	
 }
